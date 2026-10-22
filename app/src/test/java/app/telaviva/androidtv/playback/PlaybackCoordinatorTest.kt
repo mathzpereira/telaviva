@@ -52,6 +52,49 @@ class PlaybackCoordinatorTest {
     }
 
     @Test
+    fun fullscreenFallsBackToSubstreamWhenMainDecoderIsUnsupported() {
+        val factory = FakeCameraPlayerFactory()
+        val reportedErrors = mutableListOf<Pair<String, CameraTileError>>()
+        val coordinator = coordinator(factory) { cameraId, error ->
+            reportedErrors.add(cameraId to error)
+        }
+        coordinator.showGrid(grid(CameraLayout.TWO), cameras)
+        coordinator.openFullscreen(cameras.getValue("camera-1"))
+        val mainPlayer = factory.players.single { !it.released }
+        assertEquals(URI("rtsp://192.168.1.11:554/main-1"), mainPlayer.preparations.last().uri)
+
+        mainPlayer.reportFailure(PlaybackFailure(PlaybackFailureKind.UNSUPPORTED_DECODER))
+
+        val livePlayers = factory.players.filterNot(FakeCameraPlayer::released)
+        assertEquals(1, livePlayers.size)
+        assertEquals(
+            URI("rtsp://192.168.1.11:554/sub-1"),
+            livePlayers.single().preparations.last().uri,
+        )
+        assertTrue(livePlayers.single().preparations.last().audioEnabled)
+        assertTrue(reportedErrors.isEmpty())
+    }
+
+    @Test
+    fun fullscreenReportsUnsupportedWhenFallbackStreamAlsoFails() {
+        val factory = FakeCameraPlayerFactory()
+        val reportedErrors = mutableListOf<Pair<String, CameraTileError>>()
+        val coordinator = coordinator(factory) { cameraId, error ->
+            reportedErrors.add(cameraId to error)
+        }
+        coordinator.showGrid(grid(CameraLayout.TWO), cameras)
+        coordinator.openFullscreen(cameras.getValue("camera-1"))
+
+        factory.players.single { !it.released }
+            .reportFailure(PlaybackFailure(PlaybackFailureKind.UNSUPPORTED_DECODER))
+        factory.players.single { !it.released }
+            .reportFailure(PlaybackFailure(PlaybackFailureKind.UNSUPPORTED_DECODER))
+
+        assertEquals(listOf("camera-1" to CameraTileError.UNSUPPORTED_STREAM), reportedErrors)
+        assertEquals(0, factory.players.count { !it.released })
+    }
+
+    @Test
     fun backRestoresPreviousGrid() {
         val factory = FakeCameraPlayerFactory()
         val coordinator = coordinator(factory)

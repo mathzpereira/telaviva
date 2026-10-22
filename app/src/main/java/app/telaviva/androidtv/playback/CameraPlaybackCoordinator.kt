@@ -46,6 +46,7 @@ class CameraPlaybackCoordinator(
     private var currentGrid: GridSnapshot? = null
     private var gridBeforeFullscreen: GridSnapshot? = null
     private var fullscreenCameraId: String? = null
+    private var fullscreenFallbackUsed = false
     private var foreground = true
     private var nextRequestId = 0L
 
@@ -53,6 +54,7 @@ class CameraPlaybackCoordinator(
         mainExecutor.execute {
             foreground = true
             fullscreenCameraId = null
+            fullscreenFallbackUsed = false
             gridBeforeFullscreen = null
             val snapshot = GridSnapshot(state, camerasById.toMap())
             currentGrid = snapshot
@@ -70,6 +72,7 @@ class CameraPlaybackCoordinator(
     fun openFullscreen(camera: CameraConfig) {
         mainExecutor.execute {
             foreground = true
+            fullscreenFallbackUsed = false
             if (fullscreenCameraId == null) gridBeforeFullscreen = currentGrid
             fullscreenCameraId = camera.id
             reconcile(
@@ -88,6 +91,7 @@ class CameraPlaybackCoordinator(
         mainExecutor.execute {
             if (fullscreenCameraId == null) return@execute
             fullscreenCameraId = null
+            fullscreenFallbackUsed = false
             val previousGrid = gridBeforeFullscreen
             gridBeforeFullscreen = null
             if (previousGrid == null) {
@@ -103,6 +107,7 @@ class CameraPlaybackCoordinator(
     fun onAppBackgrounded() {
         mainExecutor.execute {
             foreground = false
+            fullscreenFallbackUsed = false
             desired.clear()
             pending.clear()
             releaseAllPlayers()
@@ -237,6 +242,21 @@ class CameraPlaybackCoordinator(
     ) {
         val session = sessions[cameraId] ?: return
         if (session.player !== player || session.preparationId != preparationId) return
+        if (failure.kind == PlaybackFailureKind.UNSUPPORTED_DECODER &&
+            fullscreenCameraId == cameraId &&
+            !fullscreenFallbackUsed
+        ) {
+            val fallbackUri = session.spec.camera.subRtspUri
+                ?.takeIf { it.isNotBlank() && it != session.spec.uri }
+            if (fallbackUri != null) {
+                fullscreenFallbackUsed = true
+                val fallbackSpec = session.spec.copy(uri = fallbackUri)
+                releasePlayer(cameraId)
+                desired[cameraId] = fallbackSpec
+                requestPlayback(fallbackSpec)
+                return
+            }
+        }
         releasePlayer(cameraId)
         onTileError(cameraId, PlaybackFailureMapper.map(failure))
     }
