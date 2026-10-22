@@ -21,6 +21,7 @@ class HomeScreen(
     private val onAddCamera: () -> Unit,
     private val onManageCameras: () -> Unit,
     private val onTileSelected: (Int, CameraConfig?) -> Unit,
+    private val onRetryCamera: (CameraConfig) -> Unit,
     private val onAttachPlayer: (String, PlayerView?) -> Unit,
 ) {
     val root: LinearLayout = TvViewFactory.vertical(context).apply {
@@ -31,6 +32,7 @@ class HomeScreen(
     private val layoutButtons = mutableMapOf<CameraLayout, View>()
     private val actions = mutableListOf<View>()
     private val grid: GridLayout
+    private val status = TvViewFactory.body(context, "").apply { visibility = View.GONE }
 
     init {
         val header = TvViewFactory.horizontal(context)
@@ -75,6 +77,7 @@ class HomeScreen(
             actionRow.addView(button, TvViewFactory.marginParams(end = context.dp(12)))
         }
         root.addView(actionRow, TvViewFactory.marginParams(bottom = context.dp(12)))
+        root.addView(status, TvViewFactory.marginParams(bottom = context.dp(8)))
 
         grid = GridLayout(context).apply {
             columnCount = if (state.layout.slotCount == 1) 1 else 2
@@ -90,6 +93,7 @@ class HomeScreen(
                 slotIndex = slot,
                 camera = camera,
                 onSelected = { selected -> onTileSelected(selected.slotIndex, selected.camera) },
+                onRetry = onRetryCamera,
                 onAttachPlayer = onAttachPlayer,
             )
             tiles += tile
@@ -146,6 +150,11 @@ class HomeScreen(
 
     fun setTileError(cameraId: String, message: String?) {
         tiles.firstOrNull { it.camera?.id == cameraId }?.setError(message)
+    }
+
+    fun showStatus(message: String?) {
+        status.text = message.orEmpty()
+        status.visibility = if (message.isNullOrBlank()) View.GONE else View.VISIBLE
     }
 
     fun detachPlayers() {

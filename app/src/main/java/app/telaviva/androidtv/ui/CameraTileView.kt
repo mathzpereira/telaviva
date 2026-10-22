@@ -1,6 +1,7 @@
 package app.telaviva.androidtv.ui
 
 import android.content.Context
+import android.annotation.SuppressLint
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
 import android.view.View
@@ -9,11 +10,13 @@ import android.widget.TextView
 import androidx.media3.ui.PlayerView
 import app.telaviva.androidtv.domain.CameraConfig
 
+@SuppressLint("ViewConstructor")
 class CameraTileView(
     context: Context,
     val slotIndex: Int,
     camera: CameraConfig?,
     onSelected: (CameraTileView) -> Unit,
+    onRetry: (CameraConfig) -> Unit,
     onAttachPlayer: (String, PlayerView?) -> Unit,
 ) : FrameLayout(context) {
     val playerView = PlayerView(context).apply {
@@ -45,6 +48,9 @@ class CameraTileView(
         visibility = View.GONE
         isClickable = false
     }
+    private val retryButton = TvViewFactory.button(context, "Tentar novamente").apply {
+        visibility = View.GONE
+    }
 
     var camera: CameraConfig? = camera
         private set
@@ -64,12 +70,20 @@ class CameraTileView(
         )
         addView(
             errorMessage,
-            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, android.view.Gravity.BOTTOM),
+            LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, android.view.Gravity.BOTTOM).apply {
+                bottomMargin = context.dp(74)
+            },
+        )
+        addView(
+            retryButton,
+            LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT, android.view.Gravity.BOTTOM or android.view.Gravity.END),
         )
         addView(focusOutline, LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT))
 
         updateCameraLabel()
         setOnClickListener { onSelected(this) }
+        retryButton.contentDescription = camera?.let { "Tentar novamente: ${it.name}" }
+        retryButton.setOnClickListener { camera?.let(onRetry) }
         onFocusChangeListener = OnFocusChangeListener { _, focused ->
             focusOutline.visibility = if (focused) View.VISIBLE else View.GONE
         }
@@ -77,13 +91,20 @@ class CameraTileView(
     }
 
     fun setError(message: String?) {
-        errorMessage.text = message.orEmpty()
+        errorMessage.text = if (message.isNullOrBlank()) {
+            ""
+        } else {
+            "$message\nOK para tentar novamente"
+        }
         errorMessage.visibility = if (message.isNullOrBlank()) View.GONE else View.VISIBLE
+        retryButton.visibility = if (message.isNullOrBlank() || camera == null) View.GONE else View.VISIBLE
+        nextFocusDownId = if (retryButton.visibility == View.VISIBLE) retryButton.id else View.NO_ID
     }
 
     fun showCamera(selected: CameraConfig?) {
         camera = selected
         updateCameraLabel()
+        retryButton.contentDescription = selected?.let { "Tentar novamente: ${it.name}" }
         setError(null)
     }
 

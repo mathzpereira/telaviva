@@ -8,6 +8,7 @@ import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import app.telaviva.androidtv.domain.CameraCredentials
+import app.telaviva.androidtv.R
 import app.telaviva.androidtv.network.onvif.OnvifEndpoint
 
 class CameraSetupScreen(
@@ -139,7 +140,9 @@ class CameraSetupScreen(
         } else {
             "Câmera e dois perfis H.264 encontrados. Preencha usuário e senha e salve."
         }
-        if (nameField.text.isNullOrBlank()) nameField.setText("Câmera $host")
+        if (nameField.text.isNullOrBlank()) {
+            nameField.setText(nameField.context.getString(R.string.camera_name_template, host))
+        }
     }
 
     fun clearDiscoveredSecondary() {

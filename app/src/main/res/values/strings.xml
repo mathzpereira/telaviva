@@ -1,4 +1,3 @@
 <resources>
-    <string name="app_name">Tela Viva</string>
-    <string name="add_camera">Adicionar câmera</string>
+    <string name="camera_name_template">Câmera %1$s</string>
 </resources>

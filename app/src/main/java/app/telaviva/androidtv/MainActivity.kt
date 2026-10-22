@@ -1,18 +1,23 @@
 package app.telaviva.androidtv
 
 import android.app.Activity
+import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.view.KeyEvent
 import android.view.WindowManager
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
 import app.telaviva.androidtv.data.CameraRepository
 import app.telaviva.androidtv.data.LayoutPreferences
 import app.telaviva.androidtv.domain.CameraConfig
 import app.telaviva.androidtv.domain.CameraCredentials
 import app.telaviva.androidtv.domain.CameraGridState
 import app.telaviva.androidtv.domain.CameraLayout
-import app.telaviva.androidtv.network.CameraAddressValidator
+import app.telaviva.androidtv.network.LanAction
 import app.telaviva.androidtv.network.LocalAddressPolicy
+import app.telaviva.androidtv.network.LocalNetworkPermissionGate
 import app.telaviva.androidtv.network.onvif.OnvifEndpoint
 import app.telaviva.androidtv.network.onvif.OnvifException
 import app.telaviva.androidtv.network.onvif.OnvifFailure
@@ -28,6 +33,7 @@ import app.telaviva.androidtv.ui.CameraSetupScreen
 import app.telaviva.androidtv.ui.FullscreenScreen
 import app.telaviva.androidtv.ui.HomeScreen
 import java.net.InetAddress
+import java.net.URI
 import java.util.UUID
 import java.util.concurrent.Executor
 import java.util.concurrent.ExecutorService
@@ -38,6 +44,8 @@ class MainActivity : Activity() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val mainExecutor = Executor { command -> mainHandler.post(command) }
+    private val localNetworkPermissionGate = LocalNetworkPermissionGate()
+    private var backInvokedCallback: OnBackInvokedCallback? = null
     private lateinit var ioExecutor: ExecutorService
     private lateinit var cameraRepository: CameraRepository
     private lateinit var layoutPreferences: LayoutPreferences
@@ -51,6 +59,7 @@ class MainActivity : Activity() {
     private var managementMode = false
     private var selectedSlot = 0
     private var selectedFullscreenCameraId: String? = null
+    private val retryableErrors = mutableMapOf<String, String>()
     private var lastFocusedSlot: Int? = null
     private var lastFocusedLayout: CameraLayout? = CameraLayout.ONE
     private var wasBackgrounded = false
@@ -67,6 +76,13 @@ class MainActivity : Activity() {
             mainExecutor = mainExecutor,
             onTileError = ::showPlaybackError,
         )
+        if (Build.VERSION.SDK_INT >= API_TIRAMISU) {
+            backInvokedCallback = OnBackInvokedCallback(::handleBack)
+            onBackInvokedDispatcher.registerOnBackInvokedCallback(
+                OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                checkNotNull(backInvokedCallback),
+            )
+        }
         showHome()
     }
 
@@ -87,15 +103,36 @@ class MainActivity : Activity() {
         super.onStop()
     }
 
+    @Deprecated("Deprecated in Android, retained for Android TV permission result compatibility")
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray,
+    ) {
+        if (!LocalNetworkPermissionGate.onRequestPermissionsResult(this, requestCode, permissions, grantResults)) {
+            super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        }
+    }
+
     override fun onDestroy() {
         if (::ioExecutor.isInitialized) ioExecutor.shutdownNow()
+        if (Build.VERSION.SDK_INT >= API_TIRAMISU) {
+            backInvokedCallback?.let(onBackInvokedDispatcher::unregisterOnBackInvokedCallback)
+        }
         super.onDestroy()
     }
 
-    @Deprecated("Deprecated in Android, retained for Android TV Back compatibility")
-    override fun onBackPressed() {
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+            handleBack()
+            return true
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    private fun handleBack() {
         when (currentScreen) {
-            Screen.HOME -> super.onBackPressed()
+            Screen.HOME -> finish()
             Screen.SETUP, Screen.PICKER -> showHome(selectedSlot, currentGrid.layout)
             Screen.FULLSCREEN -> closeFullscreen()
         }
@@ -150,12 +187,38 @@ class MainActivity : Activity() {
                     openPicker(slot, management = false)
                 }
             },
+            onRetryCamera = ::retryGridCamera,
             onAttachPlayer = playbackCoordinator::attach,
         )
         homeScreen = screen
         setContentView(screen.root)
         screen.requestInitialFocus(focusSlot, focusLayout)
-        playbackCoordinator.showGrid(currentGrid, cameraList.associateBy(CameraConfig::id))
+        retryableErrors.forEach(screen::setTileError)
+        val camerasById = cameraList.associateBy(CameraConfig::id)
+        val visibleCameras = currentGrid.slots
+            .take(currentGrid.layout.slotCount)
+            .filterNotNull()
+            .distinct()
+            .mapNotNull(camerasById::get)
+        if (visibleCameras.isEmpty()) {
+            screen.showStatus(null)
+            playbackCoordinator.showGrid(currentGrid, camerasById)
+        } else {
+            screen.showStatus("O Tela Viva precisa acessar a rede local para reproduzir as câmeras.")
+            localNetworkPermissionGate.ensureGranted(this, LanAction.CAMERA_CONNECTION) { granted ->
+                if (currentScreen != Screen.HOME || homeScreen !== screen) return@ensureGranted
+                if (granted) {
+                    screen.showStatus(null)
+                    playbackCoordinator.showGrid(currentGrid, camerasById)
+                } else {
+                    playbackCoordinator.onAppBackgrounded()
+                    visibleCameras.forEach { camera ->
+                        setRetryableError(camera.id, "Acesso à rede local negado. Selecione para tentar novamente.")
+                    }
+                    screen.showStatus("Permita o acesso à rede local para conectar às câmeras.")
+                }
+            }
+        }
     }
 
     private fun openSetup() {
@@ -178,16 +241,24 @@ class MainActivity : Activity() {
 
     private fun discoverCameras() {
         val screen = setupScreen ?: return
-        screen.showStatus("Buscando câmeras ONVIF na rede local…")
-        ioExecutor.execute {
-            val endpoints = WsDiscoveryClient(applicationContext).discover()
-            mainHandler.post {
-                if (currentScreen != Screen.SETUP || setupScreen !== screen) return@post
-                screen.showCandidates(endpoints)
-                screen.showStatus(
-                    if (endpoints.isEmpty()) "Nenhuma câmera encontrada. Você ainda pode configurar o RTSP manualmente."
-                    else "Encontradas ${endpoints.size} respostas ONVIF. Selecione uma câmera para carregar os perfis."
-                )
+        screen.showStatus("O Tela Viva precisa acessar a rede local para buscar câmeras ONVIF.")
+        localNetworkPermissionGate.ensureGranted(this, LanAction.DISCOVERY) { granted ->
+            if (currentScreen != Screen.SETUP || setupScreen !== screen) return@ensureGranted
+            if (!granted) {
+                screen.showStatus("Acesso à rede local negado. Você ainda pode configurar o RTSP manualmente.")
+                return@ensureGranted
+            }
+            screen.showStatus("Buscando câmeras ONVIF na rede local…")
+            ioExecutor.execute {
+                val endpoints = WsDiscoveryClient(applicationContext).discover()
+                mainHandler.post {
+                    if (currentScreen != Screen.SETUP || setupScreen !== screen) return@post
+                    screen.showCandidates(endpoints)
+                    screen.showStatus(
+                        if (endpoints.isEmpty()) "Nenhuma câmera encontrada. Você ainda pode configurar o RTSP manualmente."
+                        else "Encontradas ${endpoints.size} respostas ONVIF. Selecione uma câmera para carregar os perfis."
+                    )
+                }
             }
         }
     }
@@ -197,28 +268,36 @@ class MainActivity : Activity() {
         val username = screen.usernameField.text.toString()
         val password = screen.passwordField.text.toString()
         val credentials = CameraCredentials(username, password)
-        screen.showStatus("Carregando perfis H.264 da câmera…")
-        ioExecutor.execute {
-            val loaded = runCatching {
-                val soap = OnvifSoapClient()
-                val profiles = soap.getProfiles(endpoint, credentials)
-                when (val selection = OnvifProfileSelector.select(profiles)) {
-                    ProfileSelectionResult.UnsupportedCodec -> throw UnsupportedCameraCodecException()
-                    is ProfileSelectionResult.SelectedProfiles -> {
-                        val main = soap.getStreamUri(endpoint, selection.main.token, credentials)
-                        val secondary = selection.secondary?.let {
-                            soap.getStreamUri(endpoint, it.token, credentials)
+        screen.showStatus("O Tela Viva precisa acessar a rede local para consultar os perfis da câmera.")
+        localNetworkPermissionGate.ensureGranted(this, LanAction.CAMERA_CONNECTION) { granted ->
+            if (currentScreen != Screen.SETUP || setupScreen !== screen) return@ensureGranted
+            if (!granted) {
+                screen.showStatus("Acesso à rede local negado. Confira a permissão e tente novamente.")
+                return@ensureGranted
+            }
+            screen.showStatus("Carregando perfis H.264 da câmera…")
+            ioExecutor.execute {
+                val loaded = runCatching {
+                    val soap = OnvifSoapClient()
+                    val profiles = soap.getProfiles(endpoint, credentials)
+                    when (val selection = OnvifProfileSelector.select(profiles)) {
+                        ProfileSelectionResult.UnsupportedCodec -> throw UnsupportedCameraCodecException()
+                        is ProfileSelectionResult.SelectedProfiles -> {
+                            val main = soap.getStreamUri(endpoint, selection.main.token, credentials)
+                            val secondary = selection.secondary?.let {
+                                soap.getStreamUri(endpoint, it.token, credentials)
+                            }
+                            Triple(main.toASCIIString(), secondary?.toASCIIString(), endpoint.deviceAddress.hostAddress)
                         }
-                        Triple(main.toASCIIString(), secondary?.toASCIIString(), endpoint.deviceAddress.hostAddress)
                     }
                 }
-            }
-            mainHandler.post {
-                if (currentScreen != Screen.SETUP || setupScreen !== screen) return@post
-                loaded.onSuccess { (main, secondary, host) ->
-                    screen.fillDiscoveredCamera(host.orEmpty(), main, secondary)
-                }.onFailure { error ->
-                    screen.showStatus(safeOnvifMessage(error))
+                mainHandler.post {
+                    if (currentScreen != Screen.SETUP || setupScreen !== screen) return@post
+                    loaded.onSuccess { (main, secondary, host) ->
+                        screen.fillDiscoveredCamera(host.orEmpty(), main, secondary)
+                    }.onFailure { error ->
+                        screen.showStatus(safeOnvifMessage(error))
+                    }
                 }
             }
         }
@@ -266,40 +345,62 @@ class MainActivity : Activity() {
         mainUri: String,
         secondaryUri: String?,
     ): CameraConfig {
-        val addresses = try {
-            InetAddress.getAllByName(host.trim()).toList()
-        } catch (_: Exception) {
-            throw CameraInputException("Informe o IP local da câmera.")
-        }
-        if (addresses.isEmpty() || addresses.any { !LocalAddressPolicy.isAllowed(it) }) {
+        val address = localAddressLiteral(host)
+            ?: throw CameraInputException("Informe o IP local da câmera, sem domínio DNS.")
+        if (!LocalAddressPolicy.isAllowed(address)) {
             throw CameraInputException("O endereço precisa pertencer à rede local.")
         }
-        val main = try {
-            CameraAddressValidator.validate(mainUri)
-        } catch (_: Exception) {
-            throw CameraInputException("Informe um endereço RTSP local válido, sem usuário ou senha embutidos.")
-        }
-        if (addresses.none { it == main.resolvedAddress }) {
+        val main = manualRtspUri(mainUri)
+        val mainAddress = localAddressLiteral(main.host.orEmpty())
+        if (mainAddress != address) {
             throw CameraInputException("O IP e o endereço RTSP precisam apontar para a mesma câmera.")
         }
         val secondary = secondaryUri?.takeIf(String::isNotBlank)?.let { value ->
-            val validated = try {
-                CameraAddressValidator.validate(value)
-            } catch (_: Exception) {
-                throw CameraInputException("O perfil secundário RTSP não é válido para a rede local.")
-            }
-            if (addresses.none { it == validated.resolvedAddress }) {
+            val validated = manualRtspUri(value)
+            if (localAddressLiteral(validated.host.orEmpty()) != address) {
                 throw CameraInputException("O perfil secundário precisa apontar para a mesma câmera.")
             }
-            validated.uriWithoutUserInfo.toASCIIString()
+            validated.toASCIIString()
         }
         return CameraConfig(
             id = UUID.randomUUID().toString(),
             name = name.trim(),
             host = host.trim(),
-            mainRtspUri = main.uriWithoutUserInfo.toASCIIString(),
+            mainRtspUri = main.toASCIIString(),
             subRtspUri = secondary,
         )
+    }
+
+    private fun manualRtspUri(value: String): URI {
+        val parsed = try {
+            URI(value.trim()).normalize()
+        } catch (_: Exception) {
+            throw CameraInputException("Informe um endereço RTSP local válido.")
+        }
+        if (!parsed.scheme.equals("rtsp", ignoreCase = true) || parsed.rawUserInfo != null ||
+            parsed.host.isNullOrBlank() || parsed.port != -1 && parsed.port !in 1..MAX_PORT) {
+            throw CameraInputException("Informe um endereço RTSP local válido, sem usuário ou senha embutidos.")
+        }
+        val address = localAddressLiteral(parsed.host.orEmpty())
+            ?: throw CameraInputException("O endereço RTSP precisa usar o IP da câmera, sem domínio DNS.")
+        if (!LocalAddressPolicy.isAllowed(address)) {
+            throw CameraInputException("O endereço RTSP precisa pertencer à rede local.")
+        }
+        return parsed
+    }
+
+    private fun localAddressLiteral(value: String): InetAddress? {
+        val host = value.trim().removePrefix("[").removeSuffix("]")
+        if (':' in host) return runCatching { InetAddress.getByName(host) }.getOrNull()
+
+        val octets = host.split('.')
+        if (octets.size != IPV4_OCTETS) return null
+        val bytes = ByteArray(IPV4_OCTETS)
+        octets.forEachIndexed { index, octet ->
+            val value = octet.toIntOrNull()?.takeIf { it in 0..MAX_IPV4_OCTET } ?: return null
+            bytes[index] = value.toByte()
+        }
+        return runCatching { InetAddress.getByAddress(bytes) }.getOrNull()
     }
 
     private fun openPicker(slot: Int, management: Boolean) {
@@ -331,6 +432,7 @@ class MainActivity : Activity() {
             },
             onDelete = { camera ->
                 cameraRepository.delete(camera.id)
+                retryableErrors.remove(camera.id)
                 val slots = currentGrid.slots.map { id -> if (id == camera.id) null else id }
                 currentGrid = CameraGridState(currentGrid.layout, slots)
                 layoutPreferences.save(currentGrid)
@@ -355,12 +457,31 @@ class MainActivity : Activity() {
             context = this,
             camera = camera,
             onBack = ::closeFullscreen,
+            onRetry = { requestFullscreenPlayback(camera) },
             onAttachPlayer = playbackCoordinator::attach,
         )
         fullscreenScreen = screen
         setContentView(screen.root)
         window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
-        playbackCoordinator.openFullscreen(camera)
+        playbackCoordinator.onAppBackgrounded()
+        requestFullscreenPlayback(camera)
+    }
+
+    private fun requestFullscreenPlayback(camera: CameraConfig) {
+        val screen = fullscreenScreen ?: return
+        screen.showStatus("O Tela Viva precisa acessar a rede local para reproduzir esta câmera.")
+        localNetworkPermissionGate.ensureGranted(this, LanAction.CAMERA_CONNECTION) { granted ->
+            if (currentScreen != Screen.FULLSCREEN || fullscreenScreen !== screen) return@ensureGranted
+            if (granted) {
+                retryableErrors.remove(camera.id)
+                screen.clearError()
+                playbackCoordinator.openFullscreen(camera)
+            } else {
+                playbackCoordinator.onAppBackgrounded()
+                setRetryableError(camera.id, "Acesso à rede local negado. Selecione Tentar novamente.")
+                screen.showError(retryableErrors.getValue(camera.id))
+            }
+        }
     }
 
     private fun closeFullscreen() {
@@ -385,10 +506,36 @@ class MainActivity : Activity() {
 
     private fun showPlaybackError(cameraId: String, error: CameraTileError) {
         val message = when (error) {
-            CameraTileError.UNAVAILABLE -> "Sem sinal. Verifique a rede e tente novamente."
+            CameraTileError.UNAVAILABLE -> "Sem sinal. Verifique a rede."
             CameraTileError.AUTHENTICATION_FAILED -> "Usuário ou senha recusados."
             CameraTileError.UNSUPPORTED_STREAM -> "Formato de vídeo não compatível."
         }
+        setRetryableError(cameraId, message)
+        if (currentScreen == Screen.FULLSCREEN && selectedFullscreenCameraId == cameraId) {
+            fullscreenScreen?.showError(message)
+        }
+    }
+
+    private fun retryGridCamera(camera: CameraConfig) {
+        val screen = homeScreen ?: return
+        retryableErrors.remove(camera.id)
+        screen.setTileError(camera.id, null)
+        screen.showStatus("Tentando conectar a ${camera.name}…")
+        localNetworkPermissionGate.ensureGranted(this, LanAction.CAMERA_CONNECTION) { granted ->
+            if (currentScreen != Screen.HOME || homeScreen !== screen) return@ensureGranted
+            if (granted) {
+                screen.showStatus(null)
+                playbackCoordinator.showGrid(currentGrid, cameraRepository.list().associateBy(CameraConfig::id))
+            } else {
+                playbackCoordinator.onAppBackgrounded()
+                setRetryableError(camera.id, "Acesso à rede local negado. Selecione para tentar novamente.")
+                screen.showStatus("Permita o acesso à rede local para conectar às câmeras.")
+            }
+        }
+    }
+
+    private fun setRetryableError(cameraId: String, message: String) {
+        retryableErrors[cameraId] = message
         homeScreen?.setTileError(cameraId, message)
     }
 
@@ -412,5 +559,9 @@ class MainActivity : Activity() {
 
     companion object {
         private const val IO_THREADS = 2
+        private const val IPV4_OCTETS = 4
+        private const val MAX_IPV4_OCTET = 255
+        private const val MAX_PORT = 65535
+        private const val API_TIRAMISU = 33
     }
 }

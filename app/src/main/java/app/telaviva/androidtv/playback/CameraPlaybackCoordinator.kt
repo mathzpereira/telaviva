@@ -206,6 +206,7 @@ class CameraPlaybackCoordinator(
             return
         }
         session.spec = spec
+        updateVisiblePlayerCounts()
         session.preparationId++
         val preparationId = session.preparationId
         val player = session.player
@@ -245,6 +246,12 @@ class CameraPlaybackCoordinator(
         session.player.setFailureListener(null)
         session.player.attach(null)
         session.player.release()
+        updateVisiblePlayerCounts()
+    }
+
+    private fun updateVisiblePlayerCounts() {
+        val count = sessions.size
+        sessions.values.forEach { session -> session.player.setVisiblePlayerCount(count) }
     }
 
     private fun releaseAllPlayers() {

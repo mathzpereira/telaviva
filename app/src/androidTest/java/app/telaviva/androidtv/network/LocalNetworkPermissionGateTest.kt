@@ -32,15 +32,19 @@ class LocalNetworkPermissionGateTest {
             scenario.onActivity { activity ->
                 val platform = FakePermissionPlatform(sdkInt = 37)
                 var result: Boolean? = null
+                var networkOperations = 0
 
                 LocalNetworkPermissionGate(platform).ensureGranted(activity, LanAction.CAMERA_CONNECTION) {
                     result = it
+                    if (it) networkOperations++
                 }
 
                 assertEquals(1, platform.requestCount)
                 assertNull(result)
+                assertEquals(0, networkOperations)
                 platform.completeRequest(granted = false)
                 assertEquals(false, result)
+                assertEquals(0, networkOperations)
             }
         }
     }

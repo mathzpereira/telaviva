@@ -12,6 +12,7 @@ class FullscreenScreen(
     context: Context,
     camera: CameraConfig,
     onBack: () -> Unit,
+    onRetry: () -> Unit,
     onAttachPlayer: (String, PlayerView?) -> Unit,
 ) {
     val root: View = FrameLayout(context).apply {
@@ -22,6 +23,15 @@ class FullscreenScreen(
         useController = false
         isFocusable = false
         isSaveEnabled = false
+    }
+    private val status = TvViewFactory.body(context, "").apply {
+        setPadding(context.dp(18), context.dp(10), context.dp(18), context.dp(10))
+        setBackgroundColor(0xb3000000.toInt())
+        visibility = View.GONE
+    }
+    private val retry = TvViewFactory.button(context, "Tentar novamente").apply {
+        visibility = View.GONE
+        setOnClickListener { onRetry() }
     }
 
     init {
@@ -39,6 +49,17 @@ class FullscreenScreen(
             title,
             FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START),
         )
+        frame.addView(
+            status,
+            FrameLayout.LayoutParams(-2, -2, Gravity.CENTER),
+        )
+        frame.addView(
+            retry,
+            FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START).apply {
+                leftMargin = context.dp(24)
+                bottomMargin = context.dp(24)
+            },
+        )
         val back = TvViewFactory.button(context, "Voltar", "Voltar para as câmeras")
         back.setOnClickListener { onBack() }
         frame.addView(
@@ -50,5 +71,21 @@ class FullscreenScreen(
         )
         onAttachPlayer(camera.id, playerView)
         back.post { back.requestFocus() }
+    }
+
+    fun showStatus(message: String?) {
+        status.text = message.orEmpty()
+        status.visibility = if (message.isNullOrBlank()) View.GONE else View.VISIBLE
+    }
+
+    fun showError(message: String) {
+        showStatus(message)
+        retry.visibility = View.VISIBLE
+        retry.post { retry.requestFocus() }
+    }
+
+    fun clearError() {
+        showStatus(null)
+        retry.visibility = View.GONE
     }
 }

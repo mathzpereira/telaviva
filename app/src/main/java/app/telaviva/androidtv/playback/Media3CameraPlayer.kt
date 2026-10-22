@@ -1,6 +1,7 @@
 package app.telaviva.androidtv.playback
 
 import android.content.Context
+import android.content.pm.ApplicationInfo
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
@@ -15,6 +16,7 @@ import java.nio.charset.StandardCharsets
 interface CameraPlayer {
     fun attach(view: PlayerView?)
     fun prepare(uri: URI, credentials: CameraCredentials, audioEnabled: Boolean)
+    fun setVisiblePlayerCount(count: Int) = Unit
     fun setAudioEnabled(enabled: Boolean)
     fun setFailureListener(listener: ((PlaybackFailure) -> Unit)?)
     fun release()
@@ -26,19 +28,31 @@ fun interface CameraPlayerFactory {
 
 class Media3CameraPlayerFactory(context: Context) : CameraPlayerFactory {
     private val applicationContext = context.applicationContext
+    private val debugBuild = applicationContext.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
 
     @OptIn(UnstableApi::class)
-    override fun create(): CameraPlayer = Media3CameraPlayer(applicationContext)
+    override fun create(): CameraPlayer = Media3CameraPlayer(
+        applicationContext,
+        PlaybackMetricsListener(debugBuild = debugBuild),
+    )
 }
 
 @UnstableApi
-private class Media3CameraPlayer(context: Context) : CameraPlayer {
+private class Media3CameraPlayer(
+    context: Context,
+    private val metrics: PlaybackMetricsListener,
+) : CameraPlayer {
     private val player = ExoPlayer.Builder(context).build()
     private var attachedView: PlayerView? = null
     private var failureListener: ((PlaybackFailure) -> Unit)? = null
     private var udpFallbackUsed = false
+    private var visiblePlayerCount = 0
 
     private val playerListener = object : Player.Listener {
+        override fun onRenderedFirstFrame() {
+            metrics.onFirstFrameRendered(visiblePlayerCount)
+        }
+
         override fun onPlayerError(error: androidx.media3.common.PlaybackException) {
             if (!udpFallbackUsed && isTcpTransportFailure(error)) {
                 val currentItem = player.currentMediaItem
@@ -80,8 +94,14 @@ private class Media3CameraPlayer(context: Context) : CameraPlayer {
         val authenticatedUri = RtspAuthenticatedUri.withCredentials(uri, credentials)
         val mediaItem = MediaItem.fromUri(authenticatedUri.toASCIIString())
         player.setMediaSource(createRtspMediaSource(mediaItem, forceTcp = true))
+        metrics.onPlaybackStarted()
         player.prepare()
         player.play()
+    }
+
+    override fun setVisiblePlayerCount(count: Int) {
+        visiblePlayerCount = count.coerceAtLeast(0)
+        metrics.onVisiblePlayerCountChanged(visiblePlayerCount)
     }
 
     override fun setAudioEnabled(enabled: Boolean) {
