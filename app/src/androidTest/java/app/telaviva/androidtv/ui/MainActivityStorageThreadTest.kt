@@ -2,10 +2,13 @@ package app.telaviva.androidtv.ui
 
 import android.content.Context
 import android.os.StrictMode
+import android.os.SystemClock
 import android.view.KeyEvent
+import android.view.View
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
+import androidx.test.espresso.NoMatchingViewException
 import androidx.test.espresso.assertion.ViewAssertions.matches
 import androidx.test.espresso.matcher.ViewMatchers.isDisplayed
 import androidx.test.espresso.matcher.ViewMatchers.withContentDescription
@@ -20,6 +23,8 @@ import app.telaviva.androidtv.domain.CameraGridState
 import app.telaviva.androidtv.domain.CameraLayout
 import java.util.Collections
 import java.util.concurrent.Executor
+import junit.framework.AssertionFailedError
+import org.hamcrest.Matcher
 import org.junit.After
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -58,7 +63,7 @@ class MainActivityStorageThreadTest {
         lateinit var previousPolicy: StrictMode.ThreadPolicy
 
         ActivityScenario.launch(MainActivity::class.java).use { scenario ->
-            onView(withContentDescription("Espaço 1: Câmera A")).check(matches(isDisplayed()))
+            waitForDisplayed(withContentDescription("Espaço 1: Câmera A"))
             scenario.onActivity { activity ->
                 previousPolicy = StrictMode.getThreadPolicy()
                 StrictMode.setThreadPolicy(
@@ -77,14 +82,28 @@ class MainActivityStorageThreadTest {
             press(KeyEvent.KEYCODE_DPAD_RIGHT)
             press(KeyEvent.KEYCODE_DPAD_RIGHT)
             press(KeyEvent.KEYCODE_DPAD_CENTER)
-            onView(withText("Gerenciar câmeras")).check(matches(isDisplayed()))
-            onView(withText("Remover Câmera A")).check(matches(isDisplayed()))
+            waitForDisplayed(withText("Gerenciar câmeras"))
+            waitForDisplayed(withText("Remover Câmera A"))
             press(KeyEvent.KEYCODE_DPAD_CENTER)
-            onView(withText("Adicionar câmera")).check(matches(isDisplayed()))
+            waitForDisplayed(withText("Adicionar câmera"))
 
             scenario.onActivity { activity -> StrictMode.setThreadPolicy(previousPolicy) }
             assertTrue("Disk I/O ran on the UI thread: $violations", violations.isEmpty())
         }
+    }
+
+    private fun waitForDisplayed(matcher: Matcher<View>, timeoutMs: Long = 5_000) {
+        val deadline = SystemClock.uptimeMillis() + timeoutMs
+        while (SystemClock.uptimeMillis() < deadline) {
+            try {
+                onView(matcher).check(matches(isDisplayed()))
+                return
+            } catch (_: NoMatchingViewException) {
+            } catch (_: AssertionFailedError) {
+            }
+            SystemClock.sleep(50)
+        }
+        onView(matcher).check(matches(isDisplayed()))
     }
 
     private fun press(keyCode: Int) {
