@@ -47,10 +47,14 @@ class MainActivity : Activity() {
     private val localNetworkPermissionGate = LocalNetworkPermissionGate()
     private var backInvokedCallback: OnBackInvokedCallback? = null
     private lateinit var ioExecutor: ExecutorService
+    private lateinit var storageExecutor: ExecutorService
     private lateinit var cameraRepository: CameraRepository
     private lateinit var layoutPreferences: LayoutPreferences
     private lateinit var playbackCoordinator: CameraPlaybackCoordinator
     private var currentScreen = Screen.HOME
+    private var screenGeneration = 0L
+    private var catalogLoaded = false
+    private var cameraCatalog: List<CameraConfig> = emptyList()
     private var currentGrid = CameraGridState(CameraLayout.ONE, List(4) { null })
     private var homeScreen: HomeScreen? = null
     private var setupScreen: CameraSetupScreen? = null
@@ -69,6 +73,7 @@ class MainActivity : Activity() {
         cameraRepository = CameraRepository(this)
         layoutPreferences = LayoutPreferences(this)
         ioExecutor = Executors.newFixedThreadPool(IO_THREADS)
+        storageExecutor = Executors.newSingleThreadExecutor()
         playbackCoordinator = CameraPlaybackCoordinator(
             playerFactory = Media3CameraPlayerFactory(this),
             credentialProvider = cameraRepository::credentials,
@@ -99,6 +104,8 @@ class MainActivity : Activity() {
 
     override fun onStop() {
         if (::playbackCoordinator.isInitialized) playbackCoordinator.onAppBackgrounded()
+        screenGeneration++
+        window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         wasBackgrounded = true
         super.onStop()
     }
@@ -116,6 +123,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         if (::ioExecutor.isInitialized) ioExecutor.shutdownNow()
+        if (::storageExecutor.isInitialized) storageExecutor.shutdownNow()
         if (Build.VERSION.SDK_INT >= API_TIRAMISU) {
             backInvokedCallback?.let(onBackInvokedDispatcher::unregisterOnBackInvokedCallback)
         }
@@ -143,13 +151,41 @@ class MainActivity : Activity() {
         setupScreen = null
         fullscreenScreen = null
         currentScreen = Screen.HOME
-        val cameraList = cameraRepository.list()
-        val ids = cameraList.mapTo(mutableSetOf(), CameraConfig::id)
-        val saved = layoutPreferences.load()
-        val normalizedSlots = saved.slots.map { id -> id?.takeIf(ids::contains) }
-        currentGrid = CameraGridState(saved.layout, normalizedSlots)
-        if (currentGrid.slots != saved.slots) layoutPreferences.save(currentGrid)
+        val generation = ++screenGeneration
+        if (!catalogLoaded) {
+            storageExecutor.execute {
+                val loaded = runCatching {
+                    val cameras = cameraRepository.list()
+                    val saved = layoutPreferences.load()
+                    val ids = cameras.mapTo(mutableSetOf(), CameraConfig::id)
+                    val normalizedSlots = saved.slots.map { id -> id?.takeIf(ids::contains) }
+                    val grid = CameraGridState(saved.layout, normalizedSlots)
+                    if (grid.slots != saved.slots) layoutPreferences.save(grid)
+                    cameras to grid
+                }
+                mainHandler.post {
+                    if (currentScreen != Screen.HOME || screenGeneration != generation) return@post
+                    loaded.onSuccess { (cameras, grid) ->
+                        cameraCatalog = cameras
+                        currentGrid = grid
+                    }.onFailure {
+                        cameraCatalog = emptyList()
+                        currentGrid = emptyGrid()
+                    }
+                    catalogLoaded = true
+                    renderHome(focusSlot, focusLayout)
+                    if (loaded.isFailure) {
+                        homeScreen?.showStatus("Não foi possível carregar as câmeras salvas.")
+                    }
+                }
+            }
+            return
+        }
+        renderHome(focusSlot, focusLayout)
+    }
 
+    private fun renderHome(focusSlot: Int? = null, focusLayout: CameraLayout? = null) {
+        val cameraList = cameraCatalog
         val screen = HomeScreen(
             context = this,
             state = currentGrid,
@@ -157,7 +193,7 @@ class MainActivity : Activity() {
             organizing = organizing,
             onLayoutSelected = { layout ->
                 currentGrid = currentGrid.withLayout(layout)
-                layoutPreferences.save(currentGrid)
+                persistLayout(currentGrid)
                 lastFocusedLayout = layout
                 lastFocusedSlot = null
                 showHome(focusLayout = layout)
@@ -200,6 +236,7 @@ class MainActivity : Activity() {
             .filterNotNull()
             .distinct()
             .mapNotNull(camerasById::get)
+        setKeepScreenOn(visibleCameras.isNotEmpty())
         if (visibleCameras.isEmpty()) {
             screen.showStatus(null)
             playbackCoordinator.showGrid(currentGrid, camerasById)
@@ -222,6 +259,8 @@ class MainActivity : Activity() {
     }
 
     private fun openSetup() {
+        screenGeneration++
+        setKeepScreenOn(false)
         homeScreen?.detachPlayers()
         homeScreen = null
         fullscreenScreen = null
@@ -310,33 +349,52 @@ class MainActivity : Activity() {
         secondaryUri: String?,
         credentials: CameraCredentials,
     ) {
+        val screen = setupScreen ?: return
         if (name.isBlank()) {
-            setupScreen?.showStatus("Informe um nome para a câmera.")
+            screen.showStatus("Informe um nome para a câmera.")
             return
         }
         val camera = try {
             validateCamera(name, host, mainUri, secondaryUri)
         } catch (error: CameraInputException) {
-            setupScreen?.showStatus(error.message ?: "Confira os dados da câmera.")
+            screen.showStatus(error.message ?: "Confira os dados da câmera.")
             return
         }
 
-        try {
-            cameraRepository.save(camera, credentials)
-        } catch (_: Exception) {
-            setupScreen?.showStatus("Não foi possível salvar os dados da câmera.")
-            return
+        screen.showStatus("Salvando câmera com segurança…")
+        storageExecutor.execute {
+            val saved = runCatching {
+                cameraRepository.save(camera, credentials)
+                cameraRepository.list()
+            }
+            mainHandler.post {
+                saved.onSuccess { cameras ->
+                    cameraCatalog = cameras
+                    catalogLoaded = true
+                    screen.clearPassword()
+                    val slots = currentGrid.slots.toMutableList()
+                    val availableSlot = slots.take(currentGrid.layout.slotCount).indexOfFirst { it == null }
+                        .takeIf { it >= 0 }
+                    if (availableSlot != null) {
+                        slots[availableSlot] = camera.id
+                        currentGrid = CameraGridState(currentGrid.layout, slots)
+                        persistLayout(currentGrid)
+                    }
+                    if (currentScreen == Screen.SETUP && setupScreen === screen) {
+                        showHome(
+                            focusSlot = availableSlot,
+                            focusLayout = if (availableSlot == null) currentGrid.layout else null,
+                        )
+                    } else if (currentScreen == Screen.HOME) {
+                        showHome(focusSlot = availableSlot ?: lastFocusedSlot, focusLayout = currentGrid.layout)
+                    }
+                }.onFailure {
+                    if (setupScreen === screen) {
+                        screen.showStatus("Não foi possível salvar os dados da câmera.")
+                    }
+                }
+            }
         }
-        setupScreen?.clearPassword()
-        val slots = currentGrid.slots.toMutableList()
-        val availableSlot = slots.take(currentGrid.layout.slotCount).indexOfFirst { it == null }
-            .takeIf { it >= 0 }
-        if (availableSlot != null) {
-            slots[availableSlot] = camera.id
-            currentGrid = CameraGridState(currentGrid.layout, slots)
-            layoutPreferences.save(currentGrid)
-        }
-        showHome(focusSlot = availableSlot, focusLayout = if (availableSlot == null) currentGrid.layout else null)
     }
 
     private fun validateCamera(
@@ -404,6 +462,8 @@ class MainActivity : Activity() {
     }
 
     private fun openPicker(slot: Int, management: Boolean) {
+        screenGeneration++
+        setKeepScreenOn(false)
         homeScreen?.detachPlayers()
         homeScreen = null
         currentScreen = Screen.PICKER
@@ -413,7 +473,7 @@ class MainActivity : Activity() {
         val screen = CameraPickerScreen(
             context = this,
             slotIndex = slot,
-            cameras = cameraRepository.list(),
+            cameras = cameraCatalog,
             managementMode = management,
             onSelect = { camera ->
                 val slots = currentGrid.slots.mapIndexed { index, id ->
@@ -424,19 +484,39 @@ class MainActivity : Activity() {
                     }
                 }
                 currentGrid = CameraGridState(currentGrid.layout, slots)
-                layoutPreferences.save(currentGrid)
+                persistLayout(currentGrid)
                 organizing = false
                 managementMode = false
                 lastFocusedSlot = selectedSlot
                 showHome(focusSlot = selectedSlot)
             },
             onDelete = { camera ->
-                cameraRepository.delete(camera.id)
-                retryableErrors.remove(camera.id)
-                val slots = currentGrid.slots.map { id -> if (id == camera.id) null else id }
-                currentGrid = CameraGridState(currentGrid.layout, slots)
-                layoutPreferences.save(currentGrid)
-                openPicker(selectedSlot, management = true)
+                storageExecutor.execute {
+                    val deleted = runCatching {
+                        cameraRepository.delete(camera.id)
+                        cameraRepository.list()
+                    }
+                    mainHandler.post {
+                        deleted.onSuccess { cameras ->
+                            cameraCatalog = cameras
+                            retryableErrors.remove(camera.id)
+                            val slots = currentGrid.slots.map { id -> if (id == camera.id) null else id }
+                            currentGrid = CameraGridState(currentGrid.layout, slots)
+                            persistLayout(currentGrid)
+                            when (currentScreen) {
+                                Screen.PICKER -> openPicker(selectedSlot, managementMode)
+                                Screen.HOME -> showHome(selectedSlot, currentGrid.layout)
+                                Screen.SETUP, Screen.FULLSCREEN -> Unit
+                            }
+                        }.onFailure {
+                            android.widget.Toast.makeText(
+                                this,
+                                "Não foi possível remover a câmera.",
+                                android.widget.Toast.LENGTH_SHORT,
+                            ).show()
+                        }
+                    }
+                }
             },
             onAddCamera = { openSetup() },
             onCancel = {
@@ -449,6 +529,8 @@ class MainActivity : Activity() {
     }
 
     private fun openFullscreen(camera: CameraConfig) {
+        screenGeneration++
+        setKeepScreenOn(true)
         homeScreen?.detachPlayers()
         homeScreen = null
         currentScreen = Screen.FULLSCREEN
@@ -495,7 +577,7 @@ class MainActivity : Activity() {
     }
 
     private fun resumeFullscreen(cameraId: String) {
-        val camera = cameraRepository.list().firstOrNull { it.id == cameraId }
+        val camera = cameraCatalog.firstOrNull { it.id == cameraId }
         if (camera == null) {
             currentScreen = Screen.HOME
             showHome(selectedSlot, currentGrid.layout)
@@ -525,7 +607,7 @@ class MainActivity : Activity() {
             if (currentScreen != Screen.HOME || homeScreen !== screen) return@ensureGranted
             if (granted) {
                 screen.showStatus(null)
-                playbackCoordinator.showGrid(currentGrid, cameraRepository.list().associateBy(CameraConfig::id))
+                playbackCoordinator.showGrid(currentGrid, cameraCatalog.associateBy(CameraConfig::id))
             } else {
                 playbackCoordinator.onAppBackgrounded()
                 setRetryableError(camera.id, "Acesso à rede local negado. Selecione para tentar novamente.")
@@ -537,6 +619,18 @@ class MainActivity : Activity() {
     private fun setRetryableError(cameraId: String, message: String) {
         retryableErrors[cameraId] = message
         homeScreen?.setTileError(cameraId, message)
+    }
+
+    private fun setKeepScreenOn(keepScreenOn: Boolean) {
+        if (keepScreenOn) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    private fun persistLayout(state: CameraGridState) {
+        storageExecutor.execute { layoutPreferences.save(state) }
     }
 
     private fun safeOnvifMessage(error: Throwable): String = when (error) {

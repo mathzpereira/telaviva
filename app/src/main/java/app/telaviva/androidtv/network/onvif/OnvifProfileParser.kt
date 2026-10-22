@@ -30,6 +30,7 @@ object OnvifProfileParser {
         var encoding = ""
         var width: Int? = null
         var height: Int? = null
+        var inVideoEncoderConfiguration = false
 
         while (parser.next() != XmlPullParser.END_DOCUMENT) {
             when (parser.eventType) {
@@ -41,15 +42,25 @@ object OnvifProfileParser {
                         width = null
                         height = null
                     }
-                    "Encoding" -> if (token != null) encoding = parser.nextText().trim()
-                    "Width" -> if (token != null) width = parser.nextText().trim().toIntOrNull()
-                    "Height" -> if (token != null) height = parser.nextText().trim().toIntOrNull()
-                }
-                XmlPullParser.END_TAG -> if (parser.name == "Profiles") {
-                    token?.takeIf(String::isNotBlank)?.let { profileToken ->
-                        profiles += OnvifProfile(profileToken, encoding, width, height)
+                    "VideoEncoderConfiguration" -> inVideoEncoderConfiguration = token != null
+                    "Encoding" -> if (token != null && inVideoEncoderConfiguration) {
+                        encoding = parser.nextText().trim()
                     }
-                    token = null
+                    "Width" -> if (token != null && inVideoEncoderConfiguration) {
+                        width = parser.nextText().trim().toIntOrNull()
+                    }
+                    "Height" -> if (token != null && inVideoEncoderConfiguration) {
+                        height = parser.nextText().trim().toIntOrNull()
+                    }
+                }
+                XmlPullParser.END_TAG -> when (parser.name) {
+                    "VideoEncoderConfiguration" -> inVideoEncoderConfiguration = false
+                    "Profiles" -> {
+                        token?.takeIf(String::isNotBlank)?.let { profileToken ->
+                            profiles += OnvifProfile(profileToken, encoding, width, height)
+                        }
+                        token = null
+                    }
                 }
             }
         }

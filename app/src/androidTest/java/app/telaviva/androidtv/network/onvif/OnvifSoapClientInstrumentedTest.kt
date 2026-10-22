@@ -30,6 +30,20 @@ class OnvifSoapClientInstrumentedTest {
         )
         assertTrue(transport.requests.all { it.envelope.contains("camera-user") })
         assertFalse(transport.requests.any { it.envelope.contains("camera-password") })
+        assertTrue(
+            transport.requests.all {
+                it.envelope.contains(
+                    "Type=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest\"",
+                )
+            },
+        )
+        assertTrue(
+            transport.requests.all {
+                it.envelope.contains(
+                    "EncodingType=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary\"",
+                )
+            },
+        )
     }
 
     @Test

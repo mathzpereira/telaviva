@@ -2,6 +2,7 @@ package app.telaviva.androidtv.ui
 
 import android.content.Context
 import android.view.KeyEvent
+import android.view.WindowManager
 import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import androidx.test.espresso.Espresso.onView
@@ -19,6 +20,8 @@ import app.telaviva.androidtv.domain.CameraGridState
 import app.telaviva.androidtv.domain.CameraLayout
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 
@@ -145,6 +148,34 @@ class TvNavigationTest {
             assertEquals(CameraLayout.TWO, layoutPreferences.load().layout)
             assertEquals(CAMERA_A_ID, layoutPreferences.load().slots[0])
             onView(withContentDescription("Espaço 1: Câmera A")).check(matches(isFocused()))
+        }
+    }
+
+    @Test
+    fun keepsScreenOnWhileViewingCamerasAndClearsItInSetup() {
+        saveCamera(CAMERA_A_ID, "Câmera A")
+        layoutPreferences.save(
+            CameraGridState(CameraLayout.FOUR, listOf(CAMERA_A_ID, null, null, null)),
+        )
+
+        ActivityScenario.launch(MainActivity::class.java).use { scenario ->
+            scenario.onActivity { activity ->
+                assertTrue(
+                    activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0,
+                )
+            }
+
+            press(KeyEvent.KEYCODE_DPAD_UP)
+            onView(withContentDescription("Organizar câmeras")).check(matches(isFocused()))
+            press(KeyEvent.KEYCODE_DPAD_RIGHT)
+            onView(withContentDescription("Adicionar câmera")).check(matches(isFocused()))
+            press(KeyEvent.KEYCODE_DPAD_CENTER)
+            onView(withContentDescription("Buscar câmeras ONVIF")).check(matches(isDisplayed()))
+            scenario.onActivity { activity ->
+                assertFalse(
+                    activity.window.attributes.flags and WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON != 0,
+                )
+            }
         }
     }
 

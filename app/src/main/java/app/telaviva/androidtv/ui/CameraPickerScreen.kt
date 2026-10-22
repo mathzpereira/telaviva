@@ -53,7 +53,7 @@ class CameraPickerScreen(
                 }
                 val remove = TvViewFactory.button(
                     context,
-                    "Remover",
+                    "Remover ${camera.name}",
                     "Remover ${camera.name}",
                 ).apply {
                     setOnClickListener { onDelete(camera) }

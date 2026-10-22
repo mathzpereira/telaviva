@@ -7,6 +7,30 @@ import org.junit.Test
 
 class OnvifProfileParserTest {
     @Test
+    fun audioEncodingDoesNotReplaceVideoEncoding() {
+        val result = OnvifProfileParser.parseProfiles(
+            """
+            <s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"
+                xmlns:trt="http://www.onvif.org/ver10/media/wsdl"
+                xmlns:tt="http://www.onvif.org/ver10/schema">
+              <s:Body><trt:GetProfilesResponse><trt:Profiles token="profile-av">
+                <tt:VideoEncoderConfiguration>
+                  <tt:Encoding>H264</tt:Encoding>
+                  <tt:Resolution><tt:Width>1920</tt:Width><tt:Height>1080</tt:Height></tt:Resolution>
+                </tt:VideoEncoderConfiguration>
+                <tt:AudioEncoderConfiguration><tt:Encoding>AAC</tt:Encoding></tt:AudioEncoderConfiguration>
+              </trt:Profiles></trt:GetProfilesResponse></s:Body>
+            </s:Envelope>
+            """.trimIndent(),
+        )
+
+        val profile = (result as OnvifParseResult.Success).value.single()
+        assertEquals("H264", profile.encoding)
+        assertEquals(1920, profile.width)
+        assertEquals(1080, profile.height)
+    }
+
+    @Test
     fun parsesProfileTokensEncodingAndResolution() {
         val result = OnvifProfileParser.parseProfiles(
             """

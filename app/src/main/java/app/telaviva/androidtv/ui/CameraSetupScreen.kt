@@ -123,11 +123,24 @@ class CameraSetupScreen(
 
     fun showCandidates(endpoints: List<OnvifEndpoint>) {
         candidates.removeAllViews()
+        val buttons = mutableListOf<View>()
         endpoints.forEachIndexed { index, endpoint ->
             val address = endpoint.deviceAddress.hostAddress ?: "Câmera ${index + 1}"
             val button = TvViewFactory.button(context = candidates.context, text = "Usar câmera $address")
             button.setOnClickListener { onUseEndpoint(endpoint) }
             candidates.addView(button, TvViewFactory.marginParams(bottom = candidates.context.dp(5)))
+            buttons += button
+        }
+
+        val firstCandidate = buttons.firstOrNull()
+        val lastCandidate = buttons.lastOrNull()
+        discoveryButton.nextFocusDownId = firstCandidate?.id ?: nameField.id
+        nameField.nextFocusUpId = lastCandidate?.id ?: discoveryButton.id
+        firstCandidate?.nextFocusUpId = discoveryButton.id
+        lastCandidate?.nextFocusDownId = nameField.id
+        buttons.zipWithNext().forEach { (top, bottom) ->
+            top.nextFocusDownId = bottom.id
+            bottom.nextFocusUpId = top.id
         }
     }
 

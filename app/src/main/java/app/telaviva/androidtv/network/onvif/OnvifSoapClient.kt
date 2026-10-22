@@ -213,9 +213,9 @@ class OnvifSoapClient(
         private const val WSU_NAMESPACE =
             "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-utility-1.0.xsd"
         private const val PASSWORD_DIGEST_TYPE =
-            "$WSSE_NAMESPACE#PasswordDigest"
+            "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-username-token-profile-1.0#PasswordDigest"
         private const val NONCE_ENCODING_TYPE =
-            "$WSSE_NAMESPACE#Base64Binary"
+            "http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-soap-message-security-1.0#Base64Binary"
         private const val DEVICE_NAMESPACE = "http://www.onvif.org/ver10/device/wsdl"
         private const val MEDIA_NAMESPACE = "http://www.onvif.org/ver10/media/wsdl"
         private const val SCHEMA_NAMESPACE = "http://www.onvif.org/ver10/schema"
