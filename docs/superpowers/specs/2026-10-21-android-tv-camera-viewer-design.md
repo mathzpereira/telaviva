@@ -1,12 +1,12 @@
-# Especificação de design: Visualizador local de câmeras para Android TV
+# Especificação de design: Tela Viva
 
 - **Data:** 2026-10-21
 - **Estado:** proposta escrita para revisão do usuário
-- **Título de trabalho:** Android TV Camera Viewer
+- **Nome do app:** Tela Viva
 
 ## 1. Objetivo
 
-Criar um app nativo e leve para Fire TV e Android TV que exiba câmeras IP na mesma rede local. A experiência principal é assistir a uma câmera em tela cheia ou a um mosaico com até quatro câmeras, usando o controle remoto da TV.
+Criar o Tela Viva, um app nativo e leve para Fire TV e Android TV que exiba câmeras IP na mesma rede local. A experiência principal é assistir a uma câmera em tela cheia ou a um mosaico com até quatro câmeras, usando o controle remoto da TV.
 
 O app prioriza inicialização rápida, baixo consumo de memória e funcionamento direto na rede local, inclusive em aparelhos modestos. Não depende de conta, nuvem ou servidor intermediário.
 
