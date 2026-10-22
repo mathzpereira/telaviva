@@ -18,6 +18,10 @@ android {
 }
 
 dependencies {
+    implementation(libs.media3.exoplayer)
+    implementation(libs.media3.exoplayer.rtsp)
+    implementation(libs.media3.ui)
+
     testImplementation(libs.junit)
 
     androidTestImplementation(libs.androidx.test.core)
